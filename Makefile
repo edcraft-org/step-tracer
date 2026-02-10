@@ -1,4 +1,4 @@
-.PHONY: install test lint type-check all-checks clean
+.PHONY: install test lint type-check all-checks clean build-sandbox
 
 install:
 	uv sync
@@ -26,3 +26,9 @@ clean-tool:
 update:
 	uv lock --upgrade
 	uv sync
+
+build-sandbox:
+	@echo "Building step-tracer wheel..."
+	uv build
+	@echo "Building Docker sandbox image..."
+	docker build -t step-tracer-sandbox:latest -f docker/sandbox/Dockerfile .

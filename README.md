@@ -98,6 +98,41 @@ for var in exec_ctx.variables:
     print(f"{var.name} = {var.value} (line {var.line_number})")
 ```
 
+### Sandboxed Execution
+
+For executing untrusted code, step-tracer supports Docker-based sandboxing with strict isolation.
+
+#### Prerequisites
+
+- Docker installed
+- Build the sandbox image: `make build-sandbox`
+
+#### Basic Sandboxed Usage
+
+```python
+from step_tracer import StepTracer
+
+tracer = StepTracer()
+
+# Untrusted user code
+user_code = """
+def potentially_malicious():
+    while True:  # Infinite loop
+        pass
+potentially_malicious()
+"""
+
+transformed = tracer.transform_code(user_code)
+
+# Execute in sandbox with timeout
+try:
+    exec_ctx = tracer.execute_sandboxed(transformed)
+except SandboxTimeoutError:
+    print("Code execution timed out")
+except SandboxExecutionError as e:
+    print(f"Execution failed: {e}")
+```
+
 ## How It Works
 
 Step Tracer uses Python's `ast` module to:

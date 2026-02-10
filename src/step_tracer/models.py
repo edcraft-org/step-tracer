@@ -2,30 +2,82 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass
-class StatementExecution:
+
+def safe_repr(obj: Any, max_len: int = 500) -> str:
+    """
+    Generate a safe repr with length limit.
+
+    Args:
+        obj: Object to represent
+        max_len: Maximum length of repr string
+
+    Returns:
+        String representation, truncated if needed
+    """
+    try:
+        r = repr(obj)
+    except Exception:
+        return f"<unrepr-able {type(obj).__name__}>"
+
+    if len(r) > max_len:
+        return r[:max_len] + "…"
+    return r
+
+
+def is_safe_value(value: Any) -> bool:
+    """
+    Check if a value is safe to store directly.
+
+    Safe values include:
+    - Primitives: None, bool, int, float, str
+    - Collections: list, dict, set, tuple, frozenset (with safe contents)
+    - Complex objects are stored as repr instead
+
+    Args:
+        value: The value to check
+
+    Returns:
+        True if the value is safe to store directly, False otherwise
+    """
+    # Primitives are always safe
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+
+    # Recursively check lists, tuples and sets
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return all(is_safe_value(item) for item in value)
+
+    # Recursively check dicts
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and is_safe_value(v) for k, v in value.items())
+
+    # Everything else (custom objects, datetime, Path, etc.) -> not safe
+    return False
+
+
+class StatementExecution(BaseModel):
     """Base class for recording statement execution."""
 
     execution_id: int
     scope_id: int
     line_number: int
-    stmt_type: str = field(default="statement", init=False)
-    end_execution_id: int | None = field(default=None, init=False)
+    stmt_type: str = "statement"
+    end_execution_id: int | None = None
+
+    model_config = {"frozen": False}
 
     def set_end_execution_id(self, end_execution_id: int) -> None:
         self.end_execution_id = end_execution_id
 
 
-@dataclass
 class LoopExecution(StatementExecution):
     """Records loop execution."""
 
     loop_type: str
     num_iterations: int = 0
-
-    def __post_init__(self) -> None:
-        self.stmt_type = "loop"
+    stmt_type: str = "loop"
 
     def start_iteration(self, execution_id: int, scope_id: int) -> "LoopIteration":
         iteration = LoopIteration(
@@ -39,18 +91,14 @@ class LoopExecution(StatementExecution):
         return iteration
 
 
-@dataclass
 class LoopIteration(StatementExecution):
     """Records loop iteration."""
 
     iteration_num: int
     loop_execution_id: int
-
-    def __post_init__(self) -> None:
-        self.stmt_type = "loop_iteration"
+    stmt_type: str = "loop_iteration"
 
 
-@dataclass
 class FunctionCall(StatementExecution):
     """Records function call execution."""
 
@@ -58,41 +106,40 @@ class FunctionCall(StatementExecution):
     func_full_name: str
     func_call_exec_ctx_id: int
     func_def_line_num: int | None = None
-    arguments: dict[str, Any] = field(default_factory=dict[str, Any])
+    arguments: dict[str, Any] = Field(default_factory=dict)
     return_value: Any = None
-
-    def __post_init__(self) -> None:
-        self.stmt_type = "function"
+    stmt_type: str = "function"
 
     def reset_args(self) -> None:
         self.arguments = {}
 
     def add_arg(self, name: str, value: Any) -> None:
-        self.arguments[name] = value
+        """Add a function argument, converting unsafe values to repr."""
+        self.arguments[name] = value if is_safe_value(value) else safe_repr(value)
 
     def set_func_def_line_num(self, line_num: int) -> None:
         self.func_def_line_num = line_num
 
     def set_return_value(self, return_value: Any) -> None:
-        self.return_value = return_value
+        """Set the return value, converting unsafe values to repr."""
+        self.return_value = (
+            return_value if is_safe_value(return_value) else safe_repr(return_value)
+        )
 
 
-@dataclass
 class BranchExecution(StatementExecution):
     """Records if/else execution."""
 
     condition_str: str
     condition_result: bool
-
-    def __post_init__(self) -> None:
-        self.stmt_type = "branch"
+    stmt_type: str = "branch"
 
 
 class StatementExecutionTracker:
     """Context manager that ensures execution push/pop happen safely."""
 
     def __init__(
-        self, exec_ctx: "ExecutionContext", execution: StatementExecution
+        self, exec_ctx: "InternalExecutionContext", execution: StatementExecution
     ) -> None:
         self.exec_ctx = exec_ctx
         self.execution = execution
@@ -109,8 +156,7 @@ class StatementExecutionTracker:
         self.exec_ctx.pop_execution()
 
 
-@dataclass
-class VariableSnapshot:
+class VariableSnapshot(BaseModel):
     """Records a variable's value at a specific point in execution."""
 
     var_id: int
@@ -121,6 +167,8 @@ class VariableSnapshot:
     scope_id: int
     execution_id: int
     stmt_type: str = "variable"
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 @dataclass
@@ -137,8 +185,8 @@ class Scope:
             self.parent.children.append(self)
 
 
-class ExecutionContext:
-    """Manages overall program execution state."""
+class InternalExecutionContext:
+    """Internal runtime context managing program execution state with full tracking."""
 
     def __init__(self) -> None:
         self.execution_trace: list[StatementExecution] = []
@@ -259,13 +307,23 @@ class ExecutionContext:
         )
         scope_id = self.current_scope.scope_id
         self._var_id += 1
+
         snapshot = VariableSnapshot(
             var_id=self._var_id,
             name=name,
-            value=value,
+            value=value if is_safe_value(value) else safe_repr(value),
             access_path=access_path,
             line_number=line_number,
             scope_id=scope_id,
             execution_id=execution_id,
         )
         self.variables.append(snapshot)
+
+
+class ExecutionContext(BaseModel):
+    """Output from code execution containing trace and variable snapshots."""
+
+    execution_trace: list[StatementExecution]
+    variables: list[VariableSnapshot]
+
+    model_config = {"arbitrary_types_allowed": True}

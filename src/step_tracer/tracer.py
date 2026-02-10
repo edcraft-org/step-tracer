@@ -1,8 +1,6 @@
 import ast
-from typing import Any
 
 from step_tracer.models import ExecutionContext
-from step_tracer.step_tracer_utils import StepTracerUtils
 from step_tracer.tracer_transformer import TracerTransformer
 
 
@@ -15,22 +13,21 @@ class StepTracer:
         ast.fix_missing_locations(new_tree)
         return ast.unparse(new_tree)
 
-    def execute_transformed_code(
-        self, transformed_code: str, globals_dict: dict[str, Any] | None = None
-    ) -> ExecutionContext:
-        """Transform and execute code with tracing."""
-        if globals_dict is None:
-            globals_dict = {}
+    def execute_transformed_code(self, transformed_code: str) -> ExecutionContext:
+        """
+        Execute transformed code in a Docker sandbox with strict isolation.
 
-        exec_ctx = ExecutionContext()
-        step_tracer_utils = StepTracerUtils()
+        Args:
+            transformed_code: The transformed Python code to execute
 
-        globals_dict.update(
-            {
-                "_step_tracer_exec_ctx": exec_ctx,
-                "_step_tracer_utils": step_tracer_utils,
-            }
-        )
+        Returns:
+            ExecutionContext with execution trace and variables
 
-        exec(transformed_code, globals_dict)
-        return exec_ctx
+        Raises:
+            SandboxTimeoutError: If execution exceeds timeout
+            SandboxExecutionError: If execution fails
+        """
+        from step_tracer.sandbox import SandboxExecutor
+
+        executor = SandboxExecutor()
+        return executor.execute(transformed_code)
