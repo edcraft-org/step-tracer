@@ -173,6 +173,24 @@ make all-checks
 - **Testing**: Verify execution paths and variable states
 - **Performance Analysis**: Identify hot paths and iteration counts
 
+## Known Limitations
+
+### Function calls nested inside expressions are not tracked
+
+The tracer only instruments function calls that appear as the **top-level expression** of a statement or return value. A call buried inside a larger expression is not captured as a `FunctionCall` in the execution trace.
+
+This affects assignments, return statements, and expression statements equally. For example:
+
+```python
+# Tracked — call is the entire right-hand side / return value
+x = f(n)
+return f(n)
+
+# NOT tracked — call is nested inside a larger expression
+x = 1 + f(n)
+return 1 + f(n)
+```
+
 ## Requirements
 
 - Python >= 3.12

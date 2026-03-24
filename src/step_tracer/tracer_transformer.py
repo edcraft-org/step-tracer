@@ -75,6 +75,17 @@ class TracerTransformer(ast.NodeTransformer):
 
     ### Function Tracking Code
 
+    def visit_Return(self, node: ast.Return) -> list[ast.stmt]:
+        """Transform return statements to track function calls."""
+        self.generic_visit(node)
+
+        if node.value is not None and isinstance(node.value, ast.Call):
+            expanded_nodes = self.expand_call(node.value)
+            node.value = expanded_nodes[-1].value
+            return [expanded_nodes[0], node]
+
+        return [node]
+
     def visit_Expr(self, node: ast.Expr) -> list[ast.stmt]:
         self.generic_visit(node)
 
