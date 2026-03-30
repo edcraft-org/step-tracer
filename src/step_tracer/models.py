@@ -58,6 +58,7 @@ class FunctionCall(StatementExecution):
     func_full_name: str
     func_call_exec_ctx_id: int
     func_def_line_num: int | None = None
+    func_scope_id: int | None = None
     arguments: dict[str, Any] = field(default_factory=dict[str, Any])
     return_value: Any = None
 
@@ -72,6 +73,9 @@ class FunctionCall(StatementExecution):
 
     def set_func_def_line_num(self, line_num: int) -> None:
         self.func_def_line_num = line_num
+
+    def set_func_scope_id(self, scope_id: int) -> None:
+        self.func_scope_id = scope_id
 
     def set_return_value(self, return_value: Any) -> None:
         self.return_value = return_value
@@ -180,13 +184,13 @@ class ExecutionContext:
         self.execution_trace.append(execution)
         self.execution_stack.append(execution)
         if isinstance(execution, FunctionCall):
-            self.push_scope(
-                Scope(
-                    scope_type="function",
-                    scope_id=self.generate_scope_id(),
-                    parent=self.current_scope,
-                )
+            func_scope = Scope(
+                scope_type="function",
+                scope_id=self.generate_scope_id(),
+                parent=self.current_scope,
             )
+            execution.set_func_scope_id(func_scope.scope_id)
+            self.push_scope(func_scope)
 
     def pop_execution(self) -> None:
         execution = self.execution_stack.pop()
