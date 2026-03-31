@@ -173,22 +173,39 @@ make all-checks
 - **Testing**: Verify execution paths and variable states
 - **Performance Analysis**: Identify hot paths and iteration counts
 
+## Design Notes
+
+### Why `visit_Call` is not used for function call tracking
+
+We are unable to define `visit_Call` on the `NodeTransformer` and instrument every call in one place, because of a fundamental constraint in Python's AST: **`ast.NodeTransformer` can only replace a node with another node of the same kind**.
+
+A statement visitor (e.g. `visit_Return`) can return a *list* of statements, allowing new statements to be inserted before or after the original. But `visit_Call` must return an *expression* — it cannot emit extra statements to set up a temp variable or open a `with` block. Call tracking requires both: a statement that executes the call and captures the return value, and an expression that references that result.
+
+Instead, the transformer uses a `extract_calls` helper that walks an arbitrary expression, replaces every `Call` node with a fresh temp variable, and returns the tracking statements to prepend. The statement-level visitors (`visit_Return`, `visit_Assign`, `visit_Expr`, etc.) call `extract_calls` on their expressions and emit the resulting statements.
+
 ## Known Limitations
 
-### Function calls nested inside expressions are not tracked
+### Function calls inside scope-creating expressions are not tracked
 
-The tracer only instruments function calls that appear as the **top-level expression** of a statement or return value. A call buried inside a larger expression is not captured as a `FunctionCall` in the execution trace.
-
-This affects assignments, return statements, and expression statements equally. For example:
+Calls that appear inside a **lambda**, **list/set/dict comprehension**, or **generator expression** are not instrumented. These constructs create their own inner scope, and the calls inside them only execute when that inner scope runs — which may be lazily, repeatedly, or never. The tracer cannot safely extract those calls out to the enclosing statement level without changing program semantics.
 
 ```python
-# Tracked — call is the entire right-hand side / return value
-x = f(n)
-return f(n)
+# These calls will NOT appear in the execution trace:
+squares = [compute(x) for x in data]   # call inside list comprehension
+gen = (transform(x) for x in data)     # call inside generator expression
+fn = lambda x: process(x)              # call inside lambda body
+```
 
-# NOT tracked — call is nested inside a larger expression
-x = 1 + f(n)
-return 1 + f(n)
+The outer expression itself (the comprehension or lambda) is still recorded when it is evaluated; only the calls *within* it are invisible to the tracer.
+
+### Walrus operator (`:=`) assignments are not tracked
+
+Variable assignments made via the walrus operator (`:=`) in expressions like `if (n := 10) > 5` are not captured in the variable snapshot list. The tracer only instruments standard assignment statements (`ast.Assign`, `ast.AugAssign`, `ast.AnnAssign`).
+
+```python
+# This assignment will NOT appear in variable snapshots:
+if (n := 10) > 5:
+    pass
 ```
 
 ## Requirements

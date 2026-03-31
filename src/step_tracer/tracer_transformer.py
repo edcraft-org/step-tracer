@@ -1,4 +1,7 @@
 import ast
+from typing import TypeVar
+
+_FuncDef = TypeVar("_FuncDef", ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 class TracerTransformer(ast.NodeTransformer):
@@ -7,6 +10,12 @@ class TracerTransformer(ast.NodeTransformer):
     def __init__(self) -> None:
         super().__init__()
         self.exec_ctx_name = "_step_tracer_exec_ctx"
+        self._tmp_counter = 0
+
+    def _get_temp_var_name(self) -> str:
+        name = f"_step_tracer_tmp_{self._tmp_counter}"
+        self._tmp_counter += 1
+        return name
 
     ### Loop Tracking Code
 
@@ -25,12 +34,8 @@ class TracerTransformer(ast.NodeTransformer):
         iteration_body = self._wrap_with_ctx(node.body, self._create_loop_iter_call())
         node.body = [iteration_body]
 
-        stmts: list[ast.stmt] = [node]
-
-        if isinstance(node.iter, ast.Call):
-            expanded_nodes = self.expand_call(node.iter)
-            node.iter = expanded_nodes[-1].value
-            stmts = [*expanded_nodes, node]
+        iter_stmts, node.iter = self.extract_calls(node.iter)
+        stmts: list[ast.stmt] = [*iter_stmts, node]
 
         loop = self._wrap_with_ctx(
             stmts, self._create_loop_exec_call(node.lineno, "for")
@@ -79,34 +84,45 @@ class TracerTransformer(ast.NodeTransformer):
         """Transform return statements to track function calls."""
         self.generic_visit(node)
 
-        if node.value is not None and isinstance(node.value, ast.Call):
-            expanded_nodes = self.expand_call(node.value)
-            node.value = expanded_nodes[-1].value
-            return [expanded_nodes[0], node]
+        if node.value is not None:
+            stmts, node.value = self.extract_calls(node.value)
+            if stmts:
+                return [*stmts, node]
 
         return [node]
 
     def visit_Expr(self, node: ast.Expr) -> list[ast.stmt]:
         self.generic_visit(node)
 
-        if isinstance(node.value, ast.Call):
-            expanded_nodes: list[ast.stmt] = list(self.expand_call(node.value))
+        # Track variables on which method calls are made
+        obj_to_track: tuple[str, str, int] | None = None
+        if isinstance(node.value, ast.Call) and isinstance(
+            node.value.func, ast.Attribute
+        ):
+            obj_name = self._get_base_name(node.value.func)
+            if obj_name:
+                obj_to_track = (obj_name[0], obj_name[0], node.lineno)
 
-            # variable tracking: handles method calls with mutatable objects
-            if isinstance(node.value.func, ast.Attribute):
-                obj_name = self._get_base_name(node.value.func)
-                if obj_name:
-                    var_tracking_call = self._create_variable_tracking_call(
-                        obj_name[0], obj_name[0], node.lineno
-                    )
-                    expanded_nodes.append(var_tracking_call)
-
-            return expanded_nodes
+        stmts, node.value = self.extract_calls(node.value)
+        if stmts:
+            result: list[ast.stmt] = [*stmts, node]
+            if obj_to_track:
+                result.append(self._create_variable_tracking_call(*obj_to_track))
+            return result
 
         return [node]
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         """Transform function definitions to track execution."""
+        return self._transform_func_def(node)
+
+    def visit_AsyncFunctionDef(
+        self, node: ast.AsyncFunctionDef
+    ) -> ast.AsyncFunctionDef:
+        """Transform async function definitions to track execution."""
+        return self._transform_func_def(node)
+
+    def _transform_func_def(self, node: _FuncDef) -> _FuncDef:
         self.generic_visit(node)
 
         reset_args_call = self._create_reset_args_call()
@@ -115,7 +131,17 @@ class TracerTransformer(ast.NodeTransformer):
         )
         new_body: list[ast.stmt] = [reset_args_call, set_func_def_line_num_call]
 
-        for arg in node.args.args:
+        all_args: list[ast.arg] = [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+        if node.args.vararg:
+            all_args.append(node.args.vararg)
+        if node.args.kwarg:
+            all_args.append(node.args.kwarg)
+
+        for arg in all_args:
             arg_value_expr = ast.Name(id=arg.arg, ctx=ast.Load())
             arg_tracking_call = self._create_add_arg_call(arg.arg, arg_value_expr)
             new_body.append(arg_tracking_call)
@@ -130,10 +156,8 @@ class TracerTransformer(ast.NodeTransformer):
 
         return node
 
-    def expand_call(self, node: ast.Call) -> tuple[ast.With, ast.Expr]:
+    def _expand_call(self, node: ast.Call) -> tuple[ast.With, ast.Expr]:
         """Transform function calls to track execution."""
-        self.generic_visit(node)
-
         # Record function call
         func_name = self._get_func_name(node.func)
         func_full_name = self._get_func_full_name(node.func)
@@ -150,7 +174,7 @@ class TracerTransformer(ast.NodeTransformer):
                 arg_stmts.append(self._create_add_arg_call(kw.arg, kw.value))
 
         # Record return value
-        tmp_ret_var = "_step_tracer_tmp_ret"
+        tmp_ret_var = self._get_temp_var_name()
         temp_node = ast.Assign(
             targets=[ast.Name(id=tmp_ret_var, ctx=ast.Store())],
             value=node,
@@ -167,6 +191,56 @@ class TracerTransformer(ast.NodeTransformer):
             ),
             new_node,
         )
+
+    def extract_calls(self, expr: ast.expr) -> tuple[list[ast.stmt], ast.expr]:
+        """Recursively extract all function calls from an expression into temp vars.
+
+        Returns (stmts_to_prepend, transformed_expr) where every Call node in expr
+        has been replaced by a Name referencing a fresh temp variable, and
+        stmts_to_prepend contains the tracking With blocks that populate those vars.
+        """
+        # Don't recurse into scope-creating expressions — calls inside them
+        # only run when that inner scope executes, not at the call site.
+        if isinstance(
+            expr,
+            (ast.Lambda, ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp),
+        ):
+            return [], expr
+
+        stmts: list[ast.stmt] = []
+        if isinstance(expr, ast.Call):
+            pre: list[ast.stmt] = []
+
+            func_stmts, expr.func = self.extract_calls(expr.func)
+            pre.extend(func_stmts)
+
+            new_args = []
+            for arg in expr.args:
+                stmts, new_arg = self.extract_calls(arg)
+                pre.extend(stmts)
+                new_args.append(new_arg)
+            expr.args = new_args
+
+            for kw in expr.keywords:
+                stmts, kw.value = self.extract_calls(kw.value)
+                pre.extend(stmts)
+
+            with_stmt, tmp_expr = self._expand_call(expr)
+            return [*pre, with_stmt], tmp_expr.value
+
+        # Generic fallback: walk all child expression fields
+        for field, value in ast.iter_fields(expr):
+            if isinstance(value, ast.expr):
+                child_stmts, new_val = self.extract_calls(value)
+                setattr(expr, field, new_val)
+                stmts.extend(child_stmts)
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, ast.expr):
+                        child_stmts, new_item = self.extract_calls(item)
+                        stmts.extend(child_stmts)
+                        value[i] = new_item
+        return stmts, expr
 
     def _create_func_call(
         self, node: ast.Call, func_name: str, func_full_name: str
@@ -299,13 +373,8 @@ class TracerTransformer(ast.NodeTransformer):
         """Transform assignments to track variable changes."""
         self.generic_visit(node)
 
-        statements: list[ast.stmt] = [node]
-
-        if isinstance(node.value, ast.Call):
-            expanded_nodes = self.expand_call(node.value)
-            node.value = expanded_nodes[-1].value
-            statements = list(expanded_nodes)
-            statements[-1] = node
+        stmts, node.value = self.extract_calls(node.value)
+        statements: list[ast.stmt] = [*stmts, node]
 
         for target in node.targets:
             variables = self._extract_variable_names(target)
@@ -317,7 +386,9 @@ class TracerTransformer(ast.NodeTransformer):
         """Transform augmented assignments to track variable changes."""
         self.generic_visit(node)
 
-        statements: list[ast.stmt] = [node]
+        stmts, node.value = self.extract_calls(node.value)
+        statements: list[ast.stmt] = [*stmts, node]
+
         variables = self._extract_variable_names(node.target)
         self._add_variable_tracking_calls(statements, variables, node.lineno)
 
@@ -330,7 +401,8 @@ class TracerTransformer(ast.NodeTransformer):
         if node.value is None:
             return [node]
 
-        statements: list[ast.stmt] = [node]
+        stmts, node.value = self.extract_calls(node.value)
+        statements: list[ast.stmt] = [*stmts, node]
         variables = self._extract_variable_names(node.target)
         self._add_variable_tracking_calls(statements, variables, node.lineno)
 
