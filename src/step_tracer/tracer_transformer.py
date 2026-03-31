@@ -11,6 +11,8 @@ class TracerTransformer(ast.NodeTransformer):
         super().__init__()
         self.exec_ctx_name = "_step_tracer_exec_ctx"
         self._tmp_counter = 0
+        self._current_global_vars: set[str] = set()
+        self._current_nonlocal_vars: set[str] = set()
 
     def _get_temp_var_name(self) -> str:
         name = f"_step_tracer_tmp_{self._tmp_counter}"
@@ -94,20 +96,24 @@ class TracerTransformer(ast.NodeTransformer):
     def visit_Expr(self, node: ast.Expr) -> list[ast.stmt]:
         self.generic_visit(node)
 
-        # Track variables on which method calls are made
-        obj_to_track: tuple[str, str, int] | None = None
-        if isinstance(node.value, ast.Call) and isinstance(
-            node.value.func, ast.Attribute
-        ):
-            obj_name = self._get_base_name(node.value.func)
-            if obj_name:
-                obj_to_track = (obj_name[0], obj_name[0], node.lineno)
+        vars_to_track: list[tuple[str, str, int]] = []
+        if isinstance(node.value, ast.Call):
+            if isinstance(node.value.func, ast.Attribute):
+                # Method call: re-record the receiver (e.g. arr after arr.sort())
+                obj_name = self._get_base_name(node.value.func)
+                if obj_name:
+                    vars_to_track.append((obj_name[0], obj_name[0], node.lineno))
+            elif isinstance(node.value.func, ast.Name):
+                # Regular call: re-record any Name args (may be mutated in-place)
+                for arg in node.value.args:
+                    if isinstance(arg, ast.Name):
+                        vars_to_track.append((arg.id, arg.id, node.lineno))
 
         stmts, node.value = self.extract_calls(node.value)
         if stmts:
             result: list[ast.stmt] = [*stmts, node]
-            if obj_to_track:
-                result.append(self._create_variable_tracking_call(*obj_to_track))
+            for var in vars_to_track:
+                result.append(self._create_variable_tracking_call(*var))
             return result
 
         return [node]
@@ -122,7 +128,36 @@ class TracerTransformer(ast.NodeTransformer):
         """Transform async function definitions to track execution."""
         return self._transform_func_def(node)
 
+    def _find_global_nonlocal(
+        self,
+        node: ast.AST,
+        global_vars: set[str],
+        nonlocal_vars: set[str],
+    ) -> None:
+        """Collect global/nonlocal names declared directly in this function scope.
+
+        Does not recurse into nested function definitions.
+        """
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(child, ast.Global):
+                global_vars.update(child.names)
+            elif isinstance(child, ast.Nonlocal):
+                nonlocal_vars.update(child.names)
+            else:
+                self._find_global_nonlocal(child, global_vars, nonlocal_vars)
+
     def _transform_func_def(self, node: _FuncDef) -> _FuncDef:
+        saved_global_vars = self._current_global_vars
+        saved_nonlocal_vars = self._current_nonlocal_vars
+
+        new_global_vars: set[str] = set()
+        new_nonlocal_vars: set[str] = set()
+        self._find_global_nonlocal(node, new_global_vars, new_nonlocal_vars)
+        self._current_global_vars = new_global_vars
+        self._current_nonlocal_vars = new_nonlocal_vars
+
         self.generic_visit(node)
 
         reset_args_call = self._create_reset_args_call()
@@ -153,6 +188,9 @@ class TracerTransformer(ast.NodeTransformer):
 
         new_body.extend(node.body)
         node.body = new_body
+
+        self._current_global_vars = saved_global_vars
+        self._current_nonlocal_vars = saved_nonlocal_vars
 
         return node
 
@@ -459,8 +497,14 @@ class TracerTransformer(ast.NodeTransformer):
     def _create_variable_tracking_call(
         self, var_name: str, access_path: str, line_no: int
     ) -> ast.stmt:
+        if var_name in self._current_global_vars:
+            method = "record_global_variable"
+        elif var_name in self._current_nonlocal_vars:
+            method = "record_nonlocal_variable"
+        else:
+            method = "record_variable"
         return ast.parse(
-            f"{self.exec_ctx_name}.record_variable({var_name!r}, _step_tracer_utils.safe_deepcopy({var_name}), {access_path!r}, {line_no})"
+            f"{self.exec_ctx_name}.{method}({var_name!r}, _step_tracer_utils.safe_deepcopy({var_name}), {access_path!r}, {line_no})"
         ).body[0]
 
     # ### Conditional Tracking Code

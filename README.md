@@ -183,6 +183,27 @@ A statement visitor (e.g. `visit_Return`) can return a *list* of statements, all
 
 Instead, the transformer uses a `extract_calls` helper that walks an arbitrary expression, replaces every `Call` node with a fresh temp variable, and returns the tracking statements to prepend. The statement-level visitors (`visit_Return`, `visit_Assign`, `visit_Expr`, etc.) call `extract_calls` on their expressions and emit the resulting statements.
 
+### `self.x` assignments record the whole instance, not the attribute value
+
+When an instance attribute is assigned (`self.x = val`), the tracer resolves the target to the base name `self` and records a deepcopy of the **entire object** as the snapshot value. The `access_path` will be `"self.x"` but `value` will be the full instance state at that point, not just `val`.
+
+```python
+class Point:
+    def __init__(self, x, y):
+        self.x = x   # snapshot: value=Point(x=x, y=<unset>), access_path="self.x"
+        self.y = y   # snapshot: value=Point(x=x, y=y),       access_path="self.y"
+```
+
+### Class-body annotations without a value are not tracked
+
+A bare annotation in a class body (`x: int`) does not produce a variable snapshot. Only annotated assignments that include a value (`x: int = 0`) are instrumented.
+
+```python
+class Foo:
+    x: int        # NOT tracked — no value to snapshot
+    y: int = 0    # tracked normally
+```
+
 ## Known Limitations
 
 ### Function calls inside scope-creating expressions are not tracked
@@ -207,6 +228,25 @@ Variable assignments made via the walrus operator (`:=`) in expressions like `if
 if (n := 10) > 5:
     pass
 ```
+
+### Class support is not implemented
+
+Variables assigned in a **class body**, instance attributes set via `self`, and class attributes accessed through `cls` or the class name are not tracked. The tracer does not create a class scope, so class-level assignments are invisible to the variable snapshot list and the scope hierarchy.
+
+```python
+# None of these will appear in variable snapshots or the scope hierarchy:
+class Foo:
+    x = 10          # class-body variable — no class scope created
+
+    def __init__(self):
+        self.x = 1  # instance attribute — not recorded as a snapshot
+
+    @classmethod
+    def set_value(cls, v):
+        cls.value = v  # class attribute via cls — not recorded
+```
+
+Similarly, mutating a class attribute from outside (`Foo.x = 99`) is not captured within the class's scope, and method scopes are not linked to a parent class scope in the scope tree.
 
 ## Requirements
 

@@ -255,6 +255,48 @@ class ExecutionContext:
         )
         return branch_execution
 
+    def record_global_variable(
+        self, name: str, value: Any, access_path: str, line_number: int
+    ) -> None:
+        execution_id = (
+            self.current_execution.execution_id if self.current_execution else 0
+        )
+        self._var_id += 1
+        snapshot = VariableSnapshot(
+            var_id=self._var_id,
+            name=name,
+            value=value,
+            access_path=access_path,
+            line_number=line_number,
+            scope_id=0,
+            execution_id=execution_id,
+        )
+        self.variables.append(snapshot)
+
+    def record_nonlocal_variable(
+        self, name: str, value: Any, access_path: str, line_number: int
+    ) -> None:
+        execution_id = (
+            self.current_execution.execution_id if self.current_execution else 0
+        )
+        # Use the nearest enclosing function scope (one level up the scope stack)
+        scope_id = (
+            self.scope_stack[-2].scope_id
+            if len(self.scope_stack) >= 2
+            else self.current_scope.scope_id
+        )
+        self._var_id += 1
+        snapshot = VariableSnapshot(
+            var_id=self._var_id,
+            name=name,
+            value=value,
+            access_path=access_path,
+            line_number=line_number,
+            scope_id=scope_id,
+            execution_id=execution_id,
+        )
+        self.variables.append(snapshot)
+
     def record_variable(
         self, name: str, value: Any, access_path: str, line_number: int
     ) -> None:
