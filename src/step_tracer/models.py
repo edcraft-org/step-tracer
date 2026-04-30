@@ -110,7 +110,11 @@ class StatementExecutionTracker:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.exec_ctx.pop_execution()
+        try:
+            self.exec_ctx.pop_execution()
+        except Exception:
+            if exc_type is None:
+                raise
 
 
 @dataclass
@@ -178,11 +182,15 @@ class ExecutionContext:
         self.scope_stack.append(scope)
 
     def pop_scope(self) -> Scope:
+        if not self.scope_stack:
+            raise RuntimeError("Scope stack is empty.")
         return self.scope_stack.pop()
 
     def push_execution(self, execution: StatementExecution) -> None:
+        """Push execution and create function scope if needed."""
         self.execution_trace.append(execution)
         self.execution_stack.append(execution)
+
         if isinstance(execution, FunctionCall):
             func_scope = Scope(
                 scope_type="function",
@@ -193,8 +201,12 @@ class ExecutionContext:
             self.push_scope(func_scope)
 
     def pop_execution(self) -> None:
+        if not self.execution_stack:
+            raise RuntimeError("Execution stack is empty.")
+
         execution = self.execution_stack.pop()
         execution.set_end_execution_id(self._execution_counter)
+
         if isinstance(execution, FunctionCall):
             self.pop_scope()
 
@@ -204,114 +216,104 @@ class ExecutionContext:
         return StatementExecutionTracker(self, execution)
 
     def create_loop_execution(self, line_number: int, loop_type: str) -> LoopExecution:
-        execution_id = self.generate_execution_id()
-        scope_id = self.current_scope.scope_id
-        loop_execution = LoopExecution(
-            execution_id=execution_id,
-            scope_id=scope_id,
+        return LoopExecution(
+            execution_id=self.generate_execution_id(),
+            scope_id=self.current_scope.scope_id,
             line_number=line_number,
             loop_type=loop_type,
         )
-        return loop_execution
 
     def create_loop_iteration(self) -> LoopIteration:
-        if isinstance(self.current_execution, LoopExecution):
-            execution_id = self.generate_execution_id()
-            scope_id = self.current_scope.scope_id
-            iteration = self.current_execution.start_iteration(execution_id, scope_id)
-            return iteration
-        else:
-            raise RuntimeError("No active loop execution to record iteration for.")
+        # Find nearest loop execution in stack
+        for exec_ in reversed(self.execution_stack):
+            if isinstance(exec_, LoopExecution):
+                return exec_.start_iteration(
+                    execution_id=self.generate_execution_id(),
+                    scope_id=self.current_scope.scope_id,
+                )
+        raise RuntimeError("No active loop execution to record iteration for.")
 
     def create_function_call(
         self, line_number: int, func_name: str, func_full_name: str
     ) -> FunctionCall:
-        execution_id = self.generate_execution_id()
-        scope_id = self.current_scope.scope_id
-        func_call_exec_ctx_id = (
-            self.current_execution.execution_id if self.current_execution else 0
-        )
-        function_execution = FunctionCall(
-            execution_id=execution_id,
-            scope_id=scope_id,
+        return FunctionCall(
+            execution_id=self.generate_execution_id(),
+            scope_id=self.current_scope.scope_id,
             line_number=line_number,
             name=func_name,
             func_full_name=func_full_name,
-            func_call_exec_ctx_id=func_call_exec_ctx_id,
+            func_call_exec_ctx_id=(
+                self.current_execution.execution_id if self.current_execution else 0
+            ),
         )
-        return function_execution
 
     def create_branch_execution(
         self, line_number: int, condition_str: str, condition_result: bool
     ) -> BranchExecution:
-        execution_id = self.generate_execution_id()
-        scope_id = self.current_scope.scope_id
-        branch_execution = BranchExecution(
-            execution_id=execution_id,
-            scope_id=scope_id,
+        return BranchExecution(
+            execution_id=self.generate_execution_id(),
+            scope_id=self.current_scope.scope_id,
             line_number=line_number,
             condition_str=condition_str,
             condition_result=condition_result,
         )
-        return branch_execution
+
+    def _next_var_id(self) -> int:
+        self._var_id += 1
+        return self._var_id
+
+    def _current_execution_id(self) -> int:
+        return self.current_execution.execution_id if self.current_execution else 0
 
     def record_global_variable(
         self, name: str, value: Any, access_path: str, line_number: int
     ) -> None:
-        execution_id = (
-            self.current_execution.execution_id if self.current_execution else 0
+        self.variables.append(
+            VariableSnapshot(
+                var_id=self._next_var_id(),
+                name=name,
+                value=value,
+                access_path=access_path,
+                line_number=line_number,
+                scope_id=0,
+                execution_id=self._current_execution_id(),
+            )
         )
-        self._var_id += 1
-        snapshot = VariableSnapshot(
-            var_id=self._var_id,
-            name=name,
-            value=value,
-            access_path=access_path,
-            line_number=line_number,
-            scope_id=0,
-            execution_id=execution_id,
-        )
-        self.variables.append(snapshot)
 
     def record_nonlocal_variable(
         self, name: str, value: Any, access_path: str, line_number: int
     ) -> None:
-        execution_id = (
-            self.current_execution.execution_id if self.current_execution else 0
+        # Find nearest enclosing function scope
+        for scope in reversed(self.scope_stack[:-1]):
+            if scope.scope_type == "function":
+                scope_id = scope.scope_id
+                break
+        else:
+            scope_id = self.current_scope.scope_id
+
+        self.variables.append(
+            VariableSnapshot(
+                var_id=self._next_var_id(),
+                name=name,
+                value=value,
+                access_path=access_path,
+                line_number=line_number,
+                scope_id=scope_id,
+                execution_id=self._current_execution_id(),
+            )
         )
-        # Use the nearest enclosing function scope (one level up the scope stack)
-        scope_id = (
-            self.scope_stack[-2].scope_id
-            if len(self.scope_stack) >= 2
-            else self.current_scope.scope_id
-        )
-        self._var_id += 1
-        snapshot = VariableSnapshot(
-            var_id=self._var_id,
-            name=name,
-            value=value,
-            access_path=access_path,
-            line_number=line_number,
-            scope_id=scope_id,
-            execution_id=execution_id,
-        )
-        self.variables.append(snapshot)
 
     def record_variable(
         self, name: str, value: Any, access_path: str, line_number: int
     ) -> None:
-        execution_id = (
-            self.current_execution.execution_id if self.current_execution else 0
+        self.variables.append(
+            VariableSnapshot(
+                var_id=self._next_var_id(),
+                name=name,
+                value=value,
+                access_path=access_path,
+                line_number=line_number,
+                scope_id=self.current_scope.scope_id,
+                execution_id=self._current_execution_id(),
+            )
         )
-        scope_id = self.current_scope.scope_id
-        self._var_id += 1
-        snapshot = VariableSnapshot(
-            var_id=self._var_id,
-            name=name,
-            value=value,
-            access_path=access_path,
-            line_number=line_number,
-            scope_id=scope_id,
-            execution_id=execution_id,
-        )
-        self.variables.append(snapshot)

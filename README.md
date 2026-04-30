@@ -17,8 +17,6 @@ Step Tracer automatically instruments Python code to track its execution at a gr
 
 ## Installation
 
-### From GitHub
-
 Using uv:
 
 ```bash
@@ -35,32 +33,6 @@ For a specific branch, tag, or commit:
 
 ```bash
 uv add git+https://github.com/edcraft-org/step-tracer.git@branch-name
-```
-
-### From Local Source
-
-Using uv:
-
-```bash
-uv add /path/to/step-tracer
-```
-
-Or in editable mode for development:
-
-```bash
-uv pip install -e /path/to/step-tracer
-```
-
-Using pip:
-
-```bash
-pip install /path/to/step-tracer
-```
-
-Or in editable mode for development:
-
-```bash
-pip install -e /path/to/step-tracer
 ```
 
 ## Usage
@@ -164,14 +136,6 @@ make type-check
 # Run all checks
 make all-checks
 ```
-
-## Use Cases
-
-- **Educational Tools**: Visualize program execution for learning programming concepts
-- **Debugging**: Understand complex execution flows and variable states
-- **Code Analysis**: Analyze program behavior and execution patterns
-- **Testing**: Verify execution paths and variable states
-- **Performance Analysis**: Identify hot paths and iteration counts
 
 ## Design Notes
 
