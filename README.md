@@ -103,6 +103,8 @@ The main container for execution data:
 - **LoopExecution**: Records loop structure and iteration count
 - **LoopIteration**: Individual loop iteration details
 - **BranchExecution**: If/else conditional execution
+
+### Variables
 - **VariableSnapshot**: Variable value at a specific execution point
 
 ## Development
