@@ -35,6 +35,25 @@ For a specific branch, tag, or commit:
 uv add git+https://github.com/edcraft-org/step-tracer.git@branch-name
 ```
 
+## Browser Wheel Artifact
+
+This package is pure Python, so the same wheel can be consumed by a browser runtime such as Pyodide.
+
+- GitHub Actions: run the `browser-wheel` workflow manually to generate a downloadable wheel artifact
+- GitHub Releases: publishing a release attaches the built wheel as a release asset
+
+Expected output:
+
+```bash
+dist/step_tracer-<version>-py3-none-any.whl
+```
+
+For downstream browser apps:
+
+1. Download the wheel artifact or release asset from this repository.
+2. Place it under the app's browser runtime wheel directory, for example `public/pyodide/wheels/`.
+3. Register the wheel URL in the consuming app's runtime config.
+
 ## Usage
 
 ### Basic Example
